@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebRTC 视频通话</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+    }
+    .header {
+      text-align: center;
+      padding: 16px;
+      background: #16213e;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+    .status-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px;
+      font-size: 13px;
+      color: #aaa;
+      background: #0f3460;
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #666;
+      flex-shrink: 0;
+    }
+    .status-dot.connected { background: #4caf50; }
+    .status-dot.disconnected { background: #f44336; }
+    .status-dot.checking { background: #ff9800; }
+    .videos {
+      display: flex;
+      gap: 16px;
+      padding: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .video-box {
+      flex: 1;
+      min-width: 320px;
+      max-width: 640px;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      position: relative;
+    }
+    .video-box video {
+      width: 100%;
+      height: 360px;
+      object-fit: cover;
+      display: block;
+    }
+    .video-label {
+      position: absolute;
+      top: 10px; left: 12px;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 16px;
+      flex-wrap: wrap;
+    }
+    button {
+      padding: 10px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: #4caf50; color: #fff; }
+    .btn-danger { background: #f44336; color: #fff; }
+    input {
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid #555;
+      background: #16213e;
+      color: #eee;
+      font-size: 14px;
+      width: 160px;
+    }
+    .log-panel {
+      margin: 0 16px 16px;
+      background: #0a0a1a;
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #81c784;
+    }
+    .log-panel .info { color: #64b5f6; }
+    .log-panel .error { color: #e57373; }
+  </style>
+</head>
+<body>
+
+  <div class="header">WebRTC 视频通话</div>
+
+  <div class="status-bar">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText">等待连接...</span>
+  </div>
+
+  <div class="videos">
+    <div class="video-box">
+      <video id="localVideo" autoplay playsinline muted></video>
+      <div class="video-label">本地</div>
+    </div>
+    <div class="video-box">
+      <video id="remoteVideo" autoplay playsinline></video>
+      <div class="video-label">远端</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <input id="roomInput" value="room1" placeholder="房间号" />
+    <button class="btn-primary" id="joinBtn">加入通话</button>
+    <button class="btn-danger" id="hangupBtn" disabled>挂断</button>
+  </div>
+
+  <div class="log-panel" id="logPanel"></div>
+
+  <script>
+    // ============ 配置 ============
+    const ICE_SERVERS = [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      // 有 TURN 服务器时取消注释
+      // {
+      //   urls: "turn:turn.example.com:3478",
+      //   username: "user",
+      //   credential: "pass"
+      // }
+    ];
+
+    // ============ 状态 ============
+    let localStream = null;
+    let pc = null;
+    let ws = null;
+    let myRole = null; // "offerer" or "answerer"
+
+    // ============ DOM ============
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+    const joinBtn = document.getElementById("joinBtn");
+    const hangupBtn = document.getElementById("hangupBtn");
+    const roomInput = document.getElementById("roomInput");
+    const statusDot = document.getElementById("statusDot");
+    const statusText = document.getElementById("statusText");
+    const logPanel = document.getElementById("logPanel");
+
+    // ============ 日志 ============
+    function log(msg, type = "") {
+      const div = document.createElement("div");
+      div.className = type;
+      div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logPanel.prepend(div);
+      // 最多保留 100 条
+      while (logPanel.children.length > 100) {
+        logPanel.removeChild(logPanel.lastChild);
+      }
+    }
+
+    // ============ 状态更新 ============
+    function setStatus(text, state = "") {
+      statusText.textContent = text;
+      statusDot.className = "status-dot " + state;
+    }
+
+    // ============ 信令连接 ============
+    function connectSignaling(roomId) {
+      return new Promise((resolve, reject) => {
+        const host = window.location.hostname || "localhost";
+        const url = `ws://${host}:8080`;
+
+        log(`连接信令服务器 ${url} ...`, "info");
+
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ type: "join", room: roomId }));
+        };
+
+        ws.onmessage = async (event) => {
+          const msg = JSON.parse(event.data);
+          log(`信令收到: ${msg.type}`);
+
+          try {
+            switch (msg.type) {
+              case "peer-ready":
+                if (myRole === "offerer") {
+                  await createOffer();
+                } else {
+                  // answerer 等待对方的 offer
+                  log("等待对方发送 SDP Offer ...", "info");
+                }
+                break;
+
+              case "offer":
+                await handleOffer(msg.sdp);
+                break;
+
+              case "answer":
+                await handleAnswer(msg.sdp);
+                break;
+
+              case "ice-candidate":
+                if (msg.candidate) {
+                  await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                  log("添加 ICE 候选", "info");
+                }
+                break;
+
+              case "peer-left":
+                log("对方已离开", "error");
+                setStatus("对方已断开", "disconnected");
+                break;
+            }
+          } catch (err) {
+            log(`处理信令失败: ${err.message}`, "error");
+          }
+        };
+
+        ws.onerror = () => {
+          log("信令服务器连接失败", "error");
+          setStatus("信令服务器连接失败", "disconnected");
+          reject(new Error("信令服务器连接失败"));
+        };
+
+        ws.onclose = () => {
+          log("信令服务器断开", "error");
+          if (pc && pc.connectionState !== "closed") {
+            setStatus("信令断开，通话结束", "disconnected");
+          }
+        };
+
+        resolve(ws);
+      });
+    }
+
+    // ============ 采集本地媒体 ============
+    async function startMedia() {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+          audio: true,
+        });
+        localVideo.srcObject = localStream;
+        log("本地音视频采集成功");
+      } catch (err) {
+        log(`摄像头/麦克风获取失败: ${err.message}`, "error");
+        setStatus("摄像头获取失败", "disconnected");
+        throw err;
+      }
+    }
+
+    // ============ 创建 PeerConnection ============
+    function createPeerConnection() {
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+      // 添加本地流
+      localStream.getTracks().forEach((track) => {
+        pc.addTrack(track, localStream);
+      });
+
+      // 远端流
+      pc.ontrack = (event) => {
+        remoteVideo.srcObject = event.streams[0];
+        log("收到远端音视频流", "info");
+      };
+
+      // ICE 候选
+      pc.onicecandidate = (event) => {
+        if (event.candidate && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "ice-candidate", candidate: event.candidate }));
+        }
+      };
+
+      // 连接状态
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        log(`ICE 状态: ${state}`);
+
+        switch (state) {
+          case "checking":
+            setStatus("正在连接 ...", "checking");
+            break;
+          case "connected":
+          case "completed":
+            setStatus("已连接", "connected");
+            break;
+          case "failed":
+            setStatus("连接失败，请重试", "disconnected");
+            hangup();
+            break;
+          case "disconnected":
+            setStatus("连接断开", "disconnected");
+            break;
+          case "new":
+            setStatus("等待连接", "");
+            break;
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        log(`连接状态: ${pc.connectionState}`);
+      };
+    }
+
+    // ============ SDP 交换 - Offerer ============
+    async function createOffer() {
+      createPeerConnection();
+      myRole = "offerer";
+
+      log("正在创建 SDP Offer ...", "info");
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      log("Offer 创建成功");
+
+      // 等待 ICE 候选收集完成后再发送（优化：延迟发送完整 SDP）
+      await waitForIceGathering(pc, 1000);
+
+      ws.send(JSON.stringify({
+        type: "offer",
+        sdp: pc.localDescription,
+      }));
+      log("SDP Offer 已发送", "info");
+    }
+
+    // ============ SDP 交换 - Answerer ============
+    async function handleOffer(sdp) {
+      createPeerConnection();
+      myRole = "answerer";
+
+      log("收到 SDP Offer，正在创建 Answer ...", "info");
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      log("Answer 创建成功");
+
+      await waitForIceGathering(pc, 1000);
+
+      ws.send(JSON.stringify({
+        type: "answer",
+        sdp: pc.localDescription,
+      }));
+      log("SDP Answer 已发送", "info");
+    }
+
+    // ============ SDP 交换 - 收到 Answer ============
+    async function handleAnswer(sdp) {
+      log("收到 SDP Answer，设置远端描述 ...", "info");
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      log("远端描述设置成功，开始交换 ICE 候选", "info");
+    }
+
+    // ============ 等待 ICE 收集 ============
+    function waitForIceGathering(pc, timeoutMs) {
+      return new Promise((resolve) => {
+        if (pc.iceGatheringState === "complete") {
+          resolve();
+          return;
+        }
+
+        const timer = setTimeout(resolve, timeoutMs);
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === "complete") {
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+      });
+    }
+
+    // ============ 挂断 ============
+    function hangup() {
+      log("挂断通话");
+
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+        localStream = null;
+      }
+      if (ws) {
+        try { ws.send(JSON.stringify({ type: "leave" })); } catch (_) {}
+        ws.close();
+        ws = null;
+      }
+      localVideo.srcObject = null;
+      remoteVideo.srcObject = null;
+      myRole = null;
+      setStatus("等待连接", "");
+      joinBtn.disabled = false;
+      hangupBtn.disabled = true;
+    }
+
+    // ============ UI 绑定 ============
+    joinBtn.addEventListener("click", async () => {
+      joinBtn.disabled = true;
+      hangupBtn.disabled = false;
+
+      try {
+        await startMedia();
+        const roomId = roomInput.value.trim() || "default";
+        setStatus("加入房间: " + roomId, "");
+        log(`加入房间: ${roomId}`, "info");
+        await connectSignaling(roomId);
+      } catch (err) {
+        log(`加入失败: ${err.message}`, "error");
+        setStatus("等待连接", "");
+        hangupBtn.disabled = true;
+      }
+    });
+
+    hangupBtn.addEventListener("click", hangup);
+  </script>
+</body>
+</html>
