@@ -146,6 +146,8 @@
 
   <script>
     // ============ 配置 ============
+    // 信令服务器地址优先级: URL参数 ?signalUrl= > 自动检测 > 默认
+    const SIGNAL_URL = new URLSearchParams(window.location.search).get("signalUrl") || null;
     const ICE_SERVERS = [
       { urls: "stun:stun.l.google.com:19302" },
       { urls: "stun:stun1.l.google.com:19302" },
@@ -156,6 +158,23 @@
       //   credential: "pass"
       // }
     ];
+
+    // ============ 自动检测信令地址 ============
+    function getSignalingURL() {
+      if (SIGNAL_URL) return SIGNAL_URL;
+
+      // 信令地址优先级: URL参数 > 同主机同端口 /ws > 默认 localhost:8080
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const host = window.location.hostname || "localhost";
+      const port = window.location.port;
+
+      // 如果有指定端口，尝试用同端口 + /ws 路径（同一 HTTPS 服务）
+      if (port) {
+        return `${protocol}//${host}:${port}/ws`;
+      }
+      // 否则默认连 8080
+      return `${protocol}//${host}:8080${protocol === "wss:" ? "/ws" : ""}`;
+    }
 
     // ============ 状态 ============
     let localStream = null;
@@ -194,10 +213,11 @@
     // ============ 信令连接 ============
     function connectSignaling(roomId) {
       return new Promise((resolve, reject) => {
-        const host = window.location.hostname || "localhost";
-        const url = `ws://${host}:8080`;
-
+        const url = getSignalingURL();
         log(`连接信令服务器 ${url} ...`, "info");
+        if (SIGNAL_URL) {
+          log(`使用自定义信令地址: ${SIGNAL_URL}`, "info");
+        }
 
         ws = new WebSocket(url);
 

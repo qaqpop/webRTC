@@ -2,11 +2,12 @@
   "name": "webrtc-video-call-demo",
   "version": "1.0.0",
   "description": "WebRTC P2P video call demo",
-  "main": "signaling-server.js",
+  "main": "serve.js",
   "scripts": {
-    "start": "node signaling-server.js"
+    "start": "node serve.js"
   },
   "dependencies": {
+    "selfsigned": "^5.5.0",
     "ws": "^8.19.0"
   }
 }
